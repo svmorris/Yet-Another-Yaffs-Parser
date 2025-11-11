@@ -24,6 +24,24 @@
 
 #define SWAP_ENDIEN false
 
+/*
+ * This parser uses a pretty messy solution for finding
+ * the chunk separators. This is probably because its
+ * reverse engineered instead of parsed based on the
+ * documentation.
+ *
+ * To find the chunk delimiters the parser is just matching
+ * against n amount of 0xff bytes. In my testing 32 was able
+ * to catch all but certain large cryptography binaries like
+ * openssl (I believe this is related to the extremely large
+ * prime numbers they store). If your dumpfile is a lot more
+ * data dense, you might need a smaller one.
+ *
+ * NOTE: Make sure the compare len is the same length as the string.
+ */
+#define COMPARE_LEN 32
+#define COMPARE_CONST "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
+
 struct yaffs_obj_header
 {
     int type;      /* type of object */
@@ -86,12 +104,21 @@ int main(int argc, char **argv)
             case 1:
                 printf("File found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
                 break;
+            case 2:
+                printf("Symlink found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
+                break;
             case 3:
                 printf("Directory found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
                 break;
+            case 4:
+                printf("Hard link found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
+                break;
+            case 5:
+                printf("Special filesystem object found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
+                break;
 
             default:
-                printf("Ignoring unknown object type 0x%x at offset: 0x%lx\n", object_type, obj_offset);
+                fprintf(stderr, "Ignoring unknown object type 0x%x at offset: 0x%lx\n", object_type, obj_offset);
                 break;
         }
 
@@ -250,12 +277,12 @@ int skip_to_next_block(FILE* fp)
  */
 int skip_rest_of_block(FILE* fp)
 {
-    char bytes[10] = "";
+    char bytes[COMPARE_LEN] = "";
     unsigned long offset = ftell(fp);
     unsigned long original_offset = ftell(fp);
     while (1)
     {
-        if (e_fread(&bytes, 10, 1, fp) != 1)
+        if (e_fread(&bytes, COMPARE_LEN, 1, fp) != 1)
         {
             perror("Fread error while skipping block");
             return -1;
@@ -264,9 +291,9 @@ int skip_rest_of_block(FILE* fp)
         // This was originally 5, but apparently that many 0xff bytes are not
         // uncommon in gifs. This is not a perfect solution, but if it breaks
         // with new files just add more to it. (and everywhere else you see "10")
-        if (memcmp(bytes, "\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff", 10) == 0)
+        if (memcmp(bytes, COMPARE_CONST, COMPARE_LEN) == 0)
         {
-            fseek(fp, -10, SEEK_CUR);
+            fseek(fp, -COMPARE_LEN, SEEK_CUR);
             /* printf("Skipped to end of block at: 0x%lx\n", ftell(fp)); */
             return offset - original_offset;
         }
