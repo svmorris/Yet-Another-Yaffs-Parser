@@ -33,8 +33,7 @@
  * To find the chunk delimiters the parser is just matching
  * against n amount of 0xff bytes. In my testing 32 was able
  * to catch all but certain large cryptography binaries like
- * openssl (I believe this is related to the extremely large
- * prime numbers they store). If your dumpfile is a lot more
+ * openssl. If your dumpfile is a lot more
  * data dense, you might need a smaller one.
  *
  * NOTE: Make sure the compare len is the same length as the string.
@@ -116,7 +115,6 @@ int main(int argc, char **argv)
             case 5:
                 printf("Special filesystem object found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
                 break;
-
             default:
                 fprintf(stderr, "Ignoring unknown object type 0x%x at offset: 0x%lx\n", object_type, obj_offset);
                 break;
@@ -125,7 +123,6 @@ int main(int argc, char **argv)
         /* return 0; */
     }
 }
-
 
 /*
  * Parses a yaffs object header
@@ -169,10 +166,14 @@ struct yaffs_obj_header *parse_yaffs_header(FILE *fp)
         return NULL;
     }
 
-
-
-    // The root file always has the parent ID of 1 (at least it does in mine)
-    if (header->parent_id == 1)
+    int filename_len = helper_f_strlen(fp);
+    if (filename_len < 0)
+    {
+        fprintf(stderr, "Failed to get filename length at offset: 0x%lx\n", ftell(fp));
+        return NULL;
+    }
+    // If both are true, then this is the root directory
+    if (header->parent_id == 1 && filename_len == 0)
     {
         char filename[] = "yaffs_root";
         header->name = malloc(sizeof(filename));
@@ -182,15 +183,22 @@ struct yaffs_obj_header *parse_yaffs_header(FILE *fp)
             return NULL;
         }
         memcpy(header->name, filename, sizeof(filename));
+
+
+        // The official spec says yaffs root should have
+        // the parent ID of 1 (which is its own ID). This is
+        // annoying to deal with so I'm forcing the ID to
+        // be 0 instead.
+        header->parent_id = 0;
+    }
+    // Only the yaffs_root directory should have a 0 filename.
+    else if(filename_len == 0)
+    {
+        fprintf(stderr, "Error: Got empty filename for a non-root directory at offset 0x%lx. Skipping...\n", ftell(fp));
+        return NULL;
     }
     else
     {
-        int filename_len = helper_f_strlen(fp);
-        if (filename_len <= 0)
-        {
-            fprintf(stderr, "Failed to get filename length at offset: 0x%lx\n", ftell(fp));
-            return NULL;
-        }
         header->name = malloc(filename_len+1);
 
         if (e_fread(header->name, filename_len, 1, fp) != 1)
@@ -370,6 +378,7 @@ int helper_f_strlen(FILE *fp)
     unsigned char byte = '\0';
     int count = 0;
     int backup_offset = ftell(fp);
+    int ff_counter = 0;
     while (1)
     {
         if (fread(&byte, 1, 1, fp) != 1)
@@ -377,7 +386,19 @@ int helper_f_strlen(FILE *fp)
             perror("Error while getting string len");
             return -1;
         }
-        if (byte == 0 || byte == 0xff)
+        if (byte == 0)
+            break;
+
+        // This might just be an issue with my firmware dump
+        // but occasionally there are files where the parent_id
+        // is one byte longer than it should be. In this case
+        // a single ff gets added to the beginning of the name.
+        //
+        // I think this is just a corruption in my dump,
+        // but it should not break the parsing of normal yaffs.
+        if (byte == 0xff && ff_counter == 0)
+            continue;
+        else if (byte == 0xff)
             break;
 
         count++;
