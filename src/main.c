@@ -21,8 +21,12 @@
 #include <string.h>
 #include <stdbool.h>
 #include <signal.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
+#define _POSIX_C_SOURCE 200809L
 #define SWAP_ENDIEN false
+#define EXTRACTED_FILE_NAME "extracted"
 
 /*
  * This parser uses a pretty messy solution for finding
@@ -46,7 +50,7 @@ struct yaffs_obj_header
     int type;      /* type of object */
     int parent_id; /* id of parent directory */
     char *name;    /* pointer to object name */
-    int offset;    /* If file, offset of contents in file */
+    int offset;    /* offset in the file */
 };
 
 
@@ -54,7 +58,9 @@ int helper_f_strlen(FILE *fp);
 int skip_rest_of_block(FILE* fp);
 int skip_to_next_block(FILE* fp);
 void helper_print_hex(char *array, size_t len);
+void handle_dirs(struct yaffs_obj_header *header);
 struct yaffs_obj_header *parse_yaffs_header(FILE *fp);
+void parse_file(struct yaffs_obj_header *header, FILE *fp);
 int e_fread(void *buffer, size_t size, size_t nmemb, FILE *stream);
 
 int main(int argc, char **argv)
@@ -81,6 +87,7 @@ int main(int argc, char **argv)
         if (n < 0)
         {
             perror("File stream ended");
+            fclose(fp);
             return 0;
         }
 
@@ -102,12 +109,14 @@ int main(int argc, char **argv)
                 break;
             case 1:
                 printf("File found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
+                parse_file(header, fp);
                 break;
             case 2:
                 printf("Symlink found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
                 break;
             case 3:
                 printf("Directory found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
+                handle_dirs(header);
                 break;
             case 4:
                 printf("Hard link found at offset: 0x%lx \"%s\"\n", obj_offset, header->name);
@@ -119,9 +128,67 @@ int main(int argc, char **argv)
                 fprintf(stderr, "Ignoring unknown object type 0x%x at offset: 0x%lx\n", object_type, obj_offset);
                 break;
         }
-
-        /* return 0; */
     }
+    fclose(fp);
+    return 0;
+}
+
+/*
+ * Since actually re-creating the filesystem tree is impossible
+ * with the data in a raw dump, this just creates the main folder.
+ */
+void handle_dirs(struct yaffs_obj_header *header)
+{
+    if (strcmp(header->name, "yaffs_root") == 0)
+        if (mkdir("extracted", 0755) == -1)
+        {
+            perror("Extraction failed");
+            exit(-1);
+        }
+}
+
+/*
+ * Extract files from the data dump.
+ */
+void parse_file(struct yaffs_obj_header *header, FILE *fp)
+{
+    skip_to_next_block(fp);
+
+    unsigned long backup_offset = ftell(fp);
+    size_t file_size = skip_rest_of_block(fp);
+    if (file_size < 1)
+    {
+        fprintf(stderr, "File at offset 0x%x has no data.", header->offset);
+        return;
+    }
+
+    fseek(fp, backup_offset, SEEK_SET);
+
+    // TODO: check for colliding filenames
+
+    char *filename = malloc(strlen(header->name) + sizeof(EXTRACTED_FILE_NAME) + 1);
+    sprintf(filename, "%s/%s", EXTRACTED_FILE_NAME, header->name);
+    FILE *outfile = fopen(filename, "wb");
+
+    char byte = '\0';
+    for (int i = 0; i < file_size; i++)
+    {
+        if (e_fread(&byte, 1, 1, fp) != 1)
+        {
+            fprintf(stderr, "Error while reading file at offset 0x%x", header->offset);
+            fclose(outfile);
+            return;
+        }
+
+        if (fwrite(&byte, 1, 1, outfile) != 1)
+        {
+            perror("Error while writing file");
+            fclose(outfile);
+            return;
+        }
+    }
+
+    fclose(outfile);
 }
 
 /*
@@ -132,6 +199,7 @@ int main(int argc, char **argv)
 struct yaffs_obj_header *parse_yaffs_header(FILE *fp)
 {
     struct yaffs_obj_header *header = malloc(sizeof(struct yaffs_obj_header));
+    header->offset = (int)ftell(fp);
 
     /* printf("Attempting to interpret yaffs header at offset: %lx\n", ftell(fp)); */
 
